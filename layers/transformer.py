@@ -2,11 +2,13 @@
     Fundamental NN Layers - Transformer
 
     @author: Younghyun Kim
-    Created on 2022.09.03
+    Created: 2022.09.03
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+
 
 
 class TransformerEnc(nn.Module):
