@@ -58,7 +58,7 @@ def train_ipa(config):
         model.load_state_dict(model_state)
         optimizer.load_state_dict(optimizer_state)
 
-    while True:
+    for _ in range(config['epoch_size']):
         train(model, optimizer,train_loader, device)
         loss = validation(model, valid_loader, device)
 
@@ -200,7 +200,7 @@ def _parser():
 
     return args
 
-def main(epoch_size=None, device=None):
+def main():
     """
         main training method
     """
@@ -208,18 +208,11 @@ def main(epoch_size=None, device=None):
 
     config = IPA_TRAIN_CONFIG
 
-    if epoch_size is not None:
-        config['epoch_size'] = epoch_size
-    else:
-        config['epoch_size'] = args.epoch_size
+    config['epoch_size'] = args.epoch_size
     config['batch_size'] = args.batch_size
     config['valid_batch_size'] = args.valid_batch_size
     config['model_name'] = args.model_name
-
-    if device is not None:
-        config['device'] = device
-    else:
-        config['device'] = args.device
+    config['device'] = args.device
     config['num_samples'] = args.num_samples
 
     if args.lr is not None:
