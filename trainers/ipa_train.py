@@ -224,11 +224,12 @@ def main():
 
     ray.init(num_cpus=config['num_workers'])
 
-    sched = ASHAScheduler()
+    sched = ASHAScheduler(max_t=config['epoch_size'])
 
     resources_per_trial = {
         "cpu": args.num_workers,
-        "gpu": 1 if config['device'] == 'cuda' else 0}
+        "gpu": 1 if config['device'] == 'cuda'
+                and torch.cuda.is_available() else 0}
     tuner = tune.Tuner(
         tune.with_resources(train_ipa, resources=resources_per_trial),
         tune_config=tune.TuneConfig(
@@ -241,9 +242,6 @@ def main():
             name=config['model_name'],
             local_dir=os.path.join(config['checkpoint_dir'],
                                 config['model_name']),
-            stop={
-                "training_iteration": config['epoch_size']
-            },
         ),
         param_space=config
     )
