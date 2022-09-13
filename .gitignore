@@ -5,3 +5,5 @@ __pycache__
 *.csv
 train_data
 data_processing_notes
+ray_checkpoints
+*.pt
