@@ -9,8 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-
-
 class TransformerEnc(nn.Module):
     """
         Transformer Encoder
