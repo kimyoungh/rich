@@ -29,6 +29,7 @@ def train_ipa(config):
 
     train_loader, valid_loader = get_data_loaders(
         config['factors_path'], config['weights_path'],
+        config['regimes_path'],
         config['valid_prob'], config['batch_size'],
         config['valid_batch_size'], config['num_workers'])
 
@@ -72,7 +73,7 @@ def train_ipa(config):
 
         session.report({"loss": loss}, checkpoint=checkpoint)
 
-def get_data_loaders(factors_path, weights_path,
+def get_data_loaders(factors_path, weights_path, regimes_path,
                     valid_prob=0.3, batch_size=64,
                     valid_batch_size=64, num_workers=4):
     """
@@ -80,6 +81,7 @@ def get_data_loaders(factors_path, weights_path,
     """
     factors = np.load(factors_path, allow_pickle=True)
     weights = np.load(weights_path, allow_pickle=True)
+    regimes = np.load(regimes_path, allow_pickle=True)
 
     indices = np.arange(factors.shape[0])
     valid_size = int(valid_prob * len(indices))
@@ -89,9 +91,11 @@ def get_data_loaders(factors_path, weights_path,
     train_indices = np.setdiff1d(indices, valid_indices)
 
     train_dataset = IPADataset(factors[train_indices],
-                            weights[:, train_indices])
+                            weights[:, train_indices],
+                            regimes[train_indices])
     valid_dataset = IPADataset(factors[valid_indices],
-                            weights[:, valid_indices])
+                            weights[:, valid_indices],
+                            regimes[valid_indices])
 
     train_dataloader = DataLoader(
         train_dataset, batch_size=batch_size,

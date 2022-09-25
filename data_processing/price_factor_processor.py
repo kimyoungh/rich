@@ -25,7 +25,8 @@ class PriceFactorProcessor:
         """
         self.returns_data = returns_data
 
-        self.window_list = [5, 10, 20, 40, 60, 90, 120, 250]
+        self.window_list = [5, 10, 15, 20, 25, 30, 35,
+                            40, 45, 50, 55, 60, 90, 120, 250]
 
         self.price_points = np.array([-250, -120, -90, -60,
                                     -40, -20, -10, -5, -1])
