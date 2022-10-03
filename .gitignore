@@ -9,3 +9,6 @@ train_notes
 analysis_notes
 ray_checkpoints
 *.pt
+
+.vscode
+.DS_Store
