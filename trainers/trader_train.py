@@ -1,8 +1,8 @@
 """
-    Training procedure for Beam Trader
+    Training procedure for Trader
 
     @author: Younghyun Kim
-    Created: 2022.10.02
+    Created: 2022.10.23
 """
 import argparse
 import os
@@ -19,24 +19,24 @@ from ray.air import session
 from ray.air.checkpoint import Checkpoint
 from ray.tune.schedulers import ASHAScheduler
 
-from models.cfg.beam_trader_config import BEAM_TRADER_TRAIN_CONFIG
-from datasets.beam_trader_dataset import BeamTraderDataset
-from models.beam_trader import BeamTrader
+from models.cfg.trader_config import TRADER_TRAIN_CONFIG
+from datasets.trader_dataset import TraderDataset
+from models.trader import Trader
 
-def train_beam_trader(config):
+def train_trader(config):
     use_cuda = torch.cuda.is_available()
     device = torch.device('cuda' if use_cuda else 'cpu')
 
     train_loader, valid_loader = get_data_loaders(
         config['factors_path'], config['gfactors_path'],
-        config['best_seqs_path'],
-        config['best_rebal_seqs_path'],
+        config['weights_path'], config['return_series_path'],
+        config['rand_prob'],
         config['valid_prob'],
         int(config['batch_size'] / config['num_workers']),
         int(config['valid_batch_size'] / config['num_workers']),
         config['num_workers'])
 
-    model = BeamTrader(config).to(device)
+    model = Trader(config).to(device)
     model.eval()
 
     optimizer = optim.Adam(model.parameters(),
@@ -63,8 +63,9 @@ def train_beam_trader(config):
         optimizer.load_state_dict(optimizer_state)
 
     for _ in range(config['epoch_size']):
-        train(model, optimizer,train_loader, device)
-        loss = validation(model, valid_loader, device)
+        train(model, optimizer,train_loader, device, config['fee'])
+        loss, loss_w, loss_s = validation(model,
+            valid_loader, device, config['fee'])
 
         if lr_scheduling:
             scheduler.step()
@@ -74,10 +75,12 @@ def train_beam_trader(config):
                 "model_trained/checkpoint_model.pt")
         checkpoint = Checkpoint.from_directory("model_trained")
 
-        session.report({"loss": loss}, checkpoint=checkpoint)
+        session.report({"loss": loss, "loss_w": loss_w,
+                        "loss_s": loss_s}, checkpoint=checkpoint)
 
 def get_data_loaders(factors_path, gfactors_path,
-                    best_seqs_path, best_rebal_seqs_path,
+                    weights_path, return_series_path,
+                    rand_prob=0.2,
                     valid_prob=0.3, batch_size=64,
                     valid_batch_size=64, num_workers=4):
     """
@@ -85,8 +88,8 @@ def get_data_loaders(factors_path, gfactors_path,
     """
     factors = np.load(factors_path, allow_pickle=True)
     gfactors = np.load(gfactors_path, allow_pickle=True)
-    best_seqs = np.load(best_seqs_path, allow_pickle=True)
-    best_rebal_seqs = np.load(best_rebal_seqs_path, allow_pickle=True)
+    weights = np.load(weights_path, allow_pickle=True)
+    return_series = np.load(return_series_path, allow_pickle=True)
 
     indices = np.arange(factors.shape[0])
     valid_size = int(valid_prob * len(indices))
@@ -95,14 +98,12 @@ def get_data_loaders(factors_path, gfactors_path,
 
     train_indices = np.setdiff1d(indices, valid_indices)
 
-    train_dataset = BeamTraderDataset(factors[train_indices],
-                            gfactors[train_indices],
-                            best_seqs[train_indices],
-                            best_rebal_seqs[train_indices])
-    valid_dataset = BeamTraderDataset(factors[valid_indices],
-                            gfactors[valid_indices],
-                            best_seqs[valid_indices],
-                            best_rebal_seqs[valid_indices])
+    train_dataset = TraderDataset(factors, gfactors, weights,
+                                return_series, train_indices,
+                                rand_prob)
+    valid_dataset = TraderDataset(factors, gfactors, weights,
+                                return_series, valid_indices,
+                                rand_prob)
 
     train_dataloader = DataLoader(
         train_dataset, batch_size=batch_size,
@@ -113,99 +114,91 @@ def get_data_loaders(factors_path, gfactors_path,
 
     return train_dataloader, valid_dataloader
 
-def train(model, optimizer, train_loader, device=None):
+def calc_sr(w_preds, w_recs, returns, fee=0.004, eps=1e-6):
+    """
+        calculate sharpe ratio
+    """
+    creturns = (1. + returns).cumprod(dim=1) - 1.
+
+    weights_p_t = w_preds.unsqueeze(1) * (1 + creturns)
+    weights_p = weights_p_t / weights_p_t.sum(dim=-1, keepdim=True)
+
+    wdiff = torch.abs(w_preds - w_recs).sum(dim=-1, keepdim=True)
+
+    returns_p = (weights_p * returns).sum(dim=-1, keepdim=True)
+
+    sr = (returns_p.mean(dim=1) - (wdiff * fee)) / (
+        returns_p.std(dim=1) + eps)
+
+    return sr
+
+def train(model, optimizer, train_loader, device=None, fee=0.004):
     """
         train method
     """
     device = device or torch.device('cpu')
     model.train()
 
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.KLDivLoss(reduction='batchmean')
 
-    for (factors, factors_rebal,
-        gfactors, gfactors_rebal,
-        best_seqs, rebal_init_actions,
-        best_rebal_seqs) in train_loader:
+    for (factors, gfactors, weights,
+        weights_rec, returns) in train_loader:
         factors = factors.to(device)
-        factors_rebal = factors_rebal.view(-1, factors.shape[-2],
-                            factors.shape[-1]).to(device)
         gfactors = gfactors.to(device)
-        gfactors_rebal = gfactors_rebal.view(-1, gfactors.shape[-2],
-                            gfactors.shape[-1]).to(device)
-        best_seqs = best_seqs.to(device)
-        rebal_init_actions = rebal_init_actions.view(-1, 1).to(device)
-        best_rebal_seqs = best_rebal_seqs.view(
-            -1, best_rebal_seqs.shape[-1]).to(device)
+        weights = weights.to(device)
+        weights_rec = weights_rec.to(device)
+        returns = returns.to(device)
 
-        # No rebal
-        logits = model(factors, gfactors, best_seqs, action_init=None,
-                    enc_time_mask=True)
-        logits_l = logits[:, :-1].contiguous()
-        loss = loss_fn(logits_l.view(-1, logits_l.shape[-1]),
-                    best_seqs.view(-1))
+        # Initial Investment
+        w_preds, _ = model(factors, gfactors)
+        loss = loss_fn(w_preds.log(), weights)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # Rebal
-        logits = model(factors_rebal, gfactors_rebal,
-                    best_rebal_seqs,
-                    action_init=rebal_init_actions,
-                    enc_time_mask=True)
-        logits_l = logits[:, :-1].contiguous()
-        loss = loss_fn(logits_l.view(-1, logits_l.shape[-1]),
-                    best_rebal_seqs.view(-1))
+        # Rebalancing
+        w_preds, _ = model(factors, gfactors, weights_rec)
+        sr = calc_sr(w_preds, weights_rec, returns, fee=fee)
         optimizer.zero_grad()
-        loss.backward()
+        (-sr.mean()).backward()
         optimizer.step()
 
-def validation(model, valid_loader, device=None):
+def validation(model, valid_loader, device=None, fee=0.004):
     """
         validation method
     """
     device = device or torch.device('cpu')
     model.eval()
 
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.KLDivLoss(reduction='batchmean')
 
     losses = 0.
+    losses_l, losses_s = 0., 0.
 
-    for batch, (factors, factors_rebal,
-        gfactors, gfactors_rebal,
-        best_seqs, rebal_init_actions,
-        best_rebal_seqs) in enumerate(valid_loader):
+    for batch, (factors, gfactors, weights,
+        weights_rec, returns) in enumerate(valid_loader):
         factors = factors.to(device)
-        factors_rebal = factors_rebal.view(-1, factors.shape[-2],
-                            factors.shape[-1]).to(device)
         gfactors = gfactors.to(device)
-        gfactors_rebal = gfactors_rebal.view(-1, gfactors.shape[-2],
-                            gfactors.shape[-1]).to(device)
-        best_seqs = best_seqs.to(device)
-        rebal_init_actions = rebal_init_actions.view(-1, 1).to(device)
-        best_rebal_seqs = best_rebal_seqs.view(
-            -1, best_rebal_seqs.shape[-1]).to(device)
+        weights = weights.to(device)
+        weights_rec = weights_rec.to(device)
+        returns = returns.to(device)
 
-        # No rebal
+        # Initial Investment
         with torch.no_grad():
-            logits = model(factors, gfactors, best_seqs, action_init=None,
-                        enc_time_mask=True)
-            logits_l = logits[:, :-1].contiguous()
-            loss = loss_fn(logits_l.view(-1, logits_l.shape[-1]),
-                        best_seqs.view(-1))
+            w_preds, _ = model(factors, gfactors)
+            loss = loss_fn(w_preds.log(), weights)
 
-        # Rebal
+        # Rebalancing
         with torch.no_grad():
-            logits = model(factors_rebal, gfactors_rebal,
-                        best_rebal_seqs,
-                        action_init=rebal_init_actions,
-                        enc_time_mask=True)
-            logits_l = logits[:, :-1].contiguous()
-            loss_r = loss_fn(logits_l.view(-1, logits_l.shape[-1]),
-                        best_rebal_seqs.view(-1))
+            w_preds, _ = model(factors, gfactors, weights_rec)
+            sr = calc_sr(w_preds, weights_rec, returns, fee=fee)
+        sr = sr.mean()
 
-        losses += (loss.item() + loss_r.item()) / 2. / (batch + 1)
+        losses += (loss.item() - sr.item()) / 2. / (batch + 1)
+        losses_l += loss.item() / (batch + 1)
+        losses_s += sr.item() / (batch + 1)
 
-    return losses
+    return losses, losses_l, losses_s
 
 def _parser():
     """
@@ -215,11 +208,11 @@ def _parser():
             args
     """
     parser = argparse.ArgumentParser(
-        description="argument parser for training CrossAssetBERT"
+        description="argument parser for training Trader"
     )
 
     parser.add_argument(
-        "--num_workers", type=int, default=4,
+        "--num_workers", type=int, default=8,
         help="Set number of workers for training")
     parser.add_argument(
         "--epoch_size", type=int, default=1000,
@@ -237,10 +230,10 @@ def _parser():
         "--num_samples", type=int, default=5,
         help="num samples from ray tune")
     parser.add_argument(
-        "--model_name", type=str, default="beam_trader",
+        "--model_name", type=str, default="trader",
         help="model name")
     parser.add_argument(
-        "--device", type=str, default='cuda',
+        "--device", type=str, default='cpu',
         help="device")
     parser.add_argument(
         "--lr", type=float, default=None,
@@ -262,7 +255,7 @@ def main():
     """
     args = _parser()
 
-    config = BEAM_TRADER_TRAIN_CONFIG
+    config = TRADER_TRAIN_CONFIG
 
     config['epoch_size'] = args.epoch_size
     config['batch_size'] = args.batch_size
@@ -287,7 +280,7 @@ def main():
         "gpu": 1 if config['device'] == 'cuda'
                 and torch.cuda.is_available() else 0}
     tuner = tune.Tuner(
-        tune.with_resources(train_beam_trader,
+        tune.with_resources(train_trader,
                             resources=resources_per_trial),
         tune_config=tune.TuneConfig(
             metric="loss",
@@ -308,7 +301,7 @@ def main():
         str(best_results.log_dir), "model_trained/checkpoint_model.pt")
 
     best_model = torch.load(best_model_path,
-                            map_location=config['device'])
+                            map_location=torch.device(config['device']))
 
     best_model_save_path = os.path.join(
         config['model_path'], config['model_name'],

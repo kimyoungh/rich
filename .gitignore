@@ -12,3 +12,7 @@ ray_checkpoints
 
 .vscode
 .DS_Store
+account_info.py
+typings
+*.pq
+*.pkl
