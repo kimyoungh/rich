@@ -62,8 +62,12 @@ def train_trader(config):
         model.load_state_dict(model_state)
         optimizer.load_state_dict(optimizer_state)
 
+    w_only_epoch = int(
+        config['w_only_epoch_prob'] * config['epoch_size'])
+
     for _ in range(config['epoch_size']):
-        train(model, optimizer,train_loader, device, config['fee'])
+        train(model, optimizer,train_loader, device, config['fee'],
+            w_only_epoch)
         loss, loss_w, loss_s = validation(model,
             valid_loader, device, config['fee'])
 
@@ -132,7 +136,8 @@ def calc_sr(w_preds, w_recs, returns, fee=0.004, eps=1e-6):
 
     return sr
 
-def train(model, optimizer, train_loader, device=None, fee=0.004):
+def train(model, optimizer, train_loader, device=None, fee=0.004,
+        w_only_epoch=100):
     """
         train method
     """
@@ -141,8 +146,8 @@ def train(model, optimizer, train_loader, device=None, fee=0.004):
 
     loss_fn = nn.KLDivLoss(reduction='batchmean')
 
-    for (factors, gfactors, weights,
-        weights_rec, returns) in train_loader:
+    for epoch, (factors, gfactors, weights,
+        weights_rec, returns) in enumerate(train_loader):
         factors = factors.to(device)
         gfactors = gfactors.to(device)
         weights = weights.to(device)
@@ -156,12 +161,13 @@ def train(model, optimizer, train_loader, device=None, fee=0.004):
         loss.backward()
         optimizer.step()
 
-        # Rebalancing
-        w_preds, _ = model(factors, gfactors, weights_rec)
-        sr = calc_sr(w_preds, weights_rec, returns, fee=fee)
-        optimizer.zero_grad()
-        (-sr.mean()).backward()
-        optimizer.step()
+        if epoch >= w_only_epoch:
+            # Rebalancing
+            w_preds, _ = model(factors, gfactors, weights_rec)
+            sr = calc_sr(w_preds, weights_rec, returns, fee=fee)
+            optimizer.zero_grad()
+            (-sr.mean()).backward()
+            optimizer.step()
 
 def validation(model, valid_loader, device=None, fee=0.004):
     """

@@ -15,7 +15,7 @@ from pykrx import stock
 
 from trading.account_info import KIS_ACCOUNT_INFO
 from trading.constants import *
-from trading.access_token import get_access_token
+from trading.connection import get_access_token
 
 
 class KISDataLoader:

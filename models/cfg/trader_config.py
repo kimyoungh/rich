@@ -18,10 +18,10 @@ TRADER_CONFIG = {
     'dropout': 0.1,
     'd_model': 32,
     'nhead': 1,
-    'nlayers': 2,
+    'nlayers': 1,
     'activation': 'gelu',
     'factor_embeds_map_nlayers': 1,
-    'w_allocator_nlayers': 2,
+    'w_allocator_nlayers': 1,
     'asset_list': {
         0: 'K200',
         1: 'KQ',
@@ -47,12 +47,13 @@ _TRADER_TRAIN_CONFIG = {
         DATA_PATH+"trader/weights_train.npy",
     'return_series_path':
         DATA_PATH+"trader/return_series_train.npy",
-    'rand_prob': 0.2,
+    'w_only_epoch_prob': 0.0,
+    'rand_prob': 0.1,
     'fee': 0.001,
     'epoch_size': 1000,
     'batch_size': 32,
     'lr': tune.grid_search(
-        [0.0001, 0.001]),
+        [0.001]),
     'amsgrad': True,
     'beta_1': 0.9,
     'beta_2': 0.999,
