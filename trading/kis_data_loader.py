@@ -51,7 +51,8 @@ class KISDataLoader:
                         tdates_new[i] =\
                             date.to_pydatetime().strftime("%Y%m%d")
 
-                    self.trade_dates.append(tdates_new[1:])
+                        if i > 0:
+                            self.trade_dates.append(tdates_new[i])
 
                     with open(TRADE_DATES_PATH, 'wb') as f:
                         pickle.dump(self.trade_dates, f)
@@ -110,7 +111,7 @@ class KISDataLoader:
             end_date = date_rng[-1]
 
             timeseries = self._get_timeseries(
-                stock_code, start_date, end_date)
+                stock_code, start_date, end_date, period=period)
 
             if i == 0:
                 timeseries_total = timeseries
@@ -210,6 +211,32 @@ class KISDataLoader:
             "fid_input_iscd": stock_code,
             "fid_org_adj_prc": "1",
             "fid_period_div_code": period
+        }
+
+        res = requests.get(url, headers=headers, params=params)
+
+        return res.json()
+
+    def inquire_minute_bar(self, stock_code, target_time):
+        """
+            Inquire Minute Bar
+        """
+        url = f"{URL_BASE}/{INQUIRE_TIME_ITEMCHARTPRICE}"
+
+        headers = {
+            "Content-Type": "application/json",
+            "authorization": f"Bearer {self.access_token}",
+            "appKey": self.app_key,
+            "appSecret": self.app_secret,
+            "tr_id": "FHKST03010200"
+        }
+
+        params = {
+            'fid_etc_cls_code': "",
+            'fid_cond_mrkt_div_code': "J",
+            'fid_input_hour_1': target_time,
+            'fid_input_iscd': stock_code,
+            'fid_pw_data_incu_yn': "Y",
         }
 
         res = requests.get(url, headers=headers, params=params)

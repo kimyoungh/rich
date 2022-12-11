@@ -16,3 +16,4 @@ account_info.py
 typings
 *.pq
 *.pkl
+*.html
