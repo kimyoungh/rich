@@ -158,8 +158,6 @@ class UpbitTrader:
                     cnt += 1
                     dec = False
                     time.sleep(60 * 3)
-                else:
-                    dec = True
             dec = True
 
     def get_total_balance(self):
@@ -172,7 +170,7 @@ class UpbitTrader:
             if dicts['currency'] == 'KRW':
                 balance += float(dicts['balance'])
             else:
-                curr = dicts['currency']
+                curr = 'KRW-' + dicts['currency']
                 c_price = pyupbit.get_current_price(curr)
                 balance += float(dicts['balance']) * c_price
 

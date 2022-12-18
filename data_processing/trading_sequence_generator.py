@@ -406,20 +406,14 @@ class TradingSequenceGenerator:
         for i, action in enumerate(series):
             ret_t = returns[i, 0]
             if action == 0:
-                if ret_t < 0:
-                    ret = -ret_t
-                else:
-                    ret = 0.
+                ret = -ret_t
             else:
                 ret = ret_t
 
-            if i == 0:
-                rets.append(ret)
-            else:
-                if action != action_prev:
-                    ret = ret - (self.fee * 2)
+            if i > 0 and action != action_prev:
+                ret = ret - self.fee
 
-                rets.append(ret)
+            rets.append(ret)
 
             action_prev = action
 
