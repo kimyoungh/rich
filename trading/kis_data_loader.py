@@ -116,7 +116,8 @@ class KISDataLoader:
             if i == 0:
                 timeseries_total = timeseries
             else:
-                timeseries_total = timeseries_total.append(timeseries)
+                timeseries_total = pd.concat(
+                    (timeseries_total, timeseries), axis=0)
 
         timeseries_total = timeseries_total[
             ~timeseries_total.index.duplicated(keep='first')]

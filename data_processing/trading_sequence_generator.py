@@ -21,7 +21,8 @@ class TradingSequenceGenerator:
                 reward_list=[-2, 0, +1],
                 trading_period=24,
                 sample_num=5,
-                decay=0.99, eps=1e-6):
+                decay=0.99, eps=1e-6,
+                window_fwd=5):
         """
             Args:
                 price: price series
@@ -40,23 +41,33 @@ class TradingSequenceGenerator:
                     * default: 5
                 decay: temperature reduction coefficient
                 eps: epsilon
+                window_fwd: forward window for calculating rsi
+                    * default: 5
         """
         self.price = price[['open', 'high', 'low', 'close', 'value']]
         self.window = window
+        self.window_fwd = window_fwd
         self.returns = price[['close']].iloc[window-1:].pct_change()
         self.returns.iloc[0] = 0.
-        self.date_num = self.returns.shape[0]
 
+        self.eps = eps
         self.action_num = 2  # [Sell, Buy]
         self.actions = np.arange(self.action_num)
 
-        self.fee = fee
-        self.reward_list = np.array(reward_list)
         self.trading_period = trading_period
         self.sample_num = sample_num
 
+        self.fee = fee
+
         self.decay = decay
-        self.eps = eps
+
+        self.rsi = self.calc_rsi(self.returns)
+
+        self.returns = self.returns.loc[self.rsi.index]
+        self.price = self.price.loc[:self.rsi.index[-1]]
+
+        self.date_num = self.returns.shape[0]
+        self.reward_list = np.array(reward_list)
 
         if self.date_num < self.trading_period:
             raise Exception("Too short returns series!")
@@ -120,9 +131,22 @@ class TradingSequenceGenerator:
                 temp=temp, eps=eps)
             print("random done!")
 
+        ohlc = self.price[
+            ['open', 'high', 'low', 'close']].iloc[self.window-1:].copy()
+        o_values = ohlc.values
+        o_max = o_values.max(axis=1, keepdims=True)
+        o_min = o_values.min(axis=1, keepdims=True)
+
+        o_values = (o_values - o_min) / (o_max - o_min + self.eps)
+        ohlc = pd.DataFrame(o_values, columns=ohlc.columns,
+                            index=ohlc.index)[['open', 'close']]
+
         pmax = self.price.rolling(self.window).max().dropna()
         pmin = self.price.rolling(self.window).min().dropna()
-        pnorm = (self.price.iloc[self.window-1:] - pmin) / (pmax - pmin)
+        pnorm = (self.price.iloc[self.window-1:] - pmin) / (pmax - pmin + self.eps)
+        direc = (self.returns > 0).astype(int)
+
+        pnorm = pd.concat((ohlc, pnorm, direc), axis=1)
 
         obs = pnorm.values
 
@@ -191,23 +215,23 @@ class TradingSequenceGenerator:
             sample_num = self.sample_num
 
         action_series, rets_series,\
-            rew_series, val_series = [], [], [], []
+            rew_series, val_series, updown_series = [], [], [], [], []
 
         for i in range(self.date_length):
             actions, rets, rews, vals = [], [], [], []
+            returns = self.returns.iloc[
+                i+1:i+self.trading_period+1].values
+            rsi = self.rsi.iloc[
+                i+1:i+self.trading_period+1].values
             for _ in range(sample_num):
                 if mode != 'random':
                     action_top, ret_top, rew_top, val_top =\
-                        self.search_strategy_series(
-                            self.returns.iloc[
-                                i+1:i+self.trading_period+1].values,
+                        self.search_strategy_series(returns,
                             mode=mode, pick_num=pick_num, temp=temp,
                             eps=eps)
                 else:
                     action_top, ret_top, rew_top, val_top =\
-                        self.random_strategy_series(
-                            self.returns.iloc[
-                                i+1:i+self.trading_period+1].values)
+                        self.random_strategy_series(returns)
 
                 actions.append(action_top)
                 rets.append(ret_top)
@@ -224,10 +248,14 @@ class TradingSequenceGenerator:
             rew_series.append(rews)
             val_series.append(vals)
 
+            updowns = (rsi > 0.5).astype(int).ravel()
+            updown_series.append(updowns)
+
         action_series = np.stack(action_series, axis=0)
         rets_series = np.stack(rets_series, axis=0)
         rew_series = np.stack(rew_series, axis=0)
         val_series = np.stack(val_series, axis=0)
+        updown_series = np.stack(updown_series, axis=0)
 
         date_series = self.returns.index.values[:self.date_length]
 
@@ -236,6 +264,7 @@ class TradingSequenceGenerator:
         dataset['rets_series'] = rets_series
         dataset['rew_series'] = rew_series
         dataset['val_series'] = val_series
+        dataset['updown_series'] = updown_series
         dataset['date_series'] = date_series
 
         return dataset
@@ -425,3 +454,22 @@ class TradingSequenceGenerator:
         values = rewards[::-1].cumsum()[::-1]
 
         return rets, rewards, values
+
+    def calc_rsi(self, returns):
+        """
+            calculate rsi
+        """
+        ups = returns.copy()
+        ups[returns < 0] = 0.
+
+        downs = returns.copy()
+        downs[returns > 0] = 0.
+
+        au = ups.iloc[::-1].rolling(
+            self.window_fwd).mean().iloc[::-1]
+        ad = -downs.iloc[::-1].rolling(
+            self.window_fwd).mean().iloc[::-1]
+
+        rsi = au / (au + ad + self.eps)
+
+        return rsi.dropna()

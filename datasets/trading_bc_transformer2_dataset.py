@@ -12,7 +12,8 @@ class TradingBCTransformer2Dataset(Dataset):
     """
         Trading BC Transformer 2 Dataset
     """
-    def __init__(self, observations, action_series, asset_idx=0):
+    def __init__(self, observations, action_series, updown_series,
+                asset_idx=0):
         """
             Initialization
 
@@ -23,6 +24,9 @@ class TradingBCTransformer2Dataset(Dataset):
                 action_series: action series
                     * dtype: np.array
                     * shape: (date_num, sample_num, seq_len)
+                updown_series: updown series
+                    * dtype: np.array
+                    * shape: (date_num, seq_len)
                 asset_idx: asset index
                     * default: 0
         """
@@ -31,6 +35,7 @@ class TradingBCTransformer2Dataset(Dataset):
 
         self.observations = observations
         self.action_series = action_series
+        self.updown_series = updown_series
 
         self.asset_idx = int(asset_idx)
 
@@ -53,6 +58,9 @@ class TradingBCTransformer2Dataset(Dataset):
                 actions: action series
                     * dtype: torch.LongTensor
                     * shape: (-1, seq_len)
+                updowns: updown series
+                    * dtype: torch.LongTensor
+                    * shape: (-1, seq_len)
         """
         assets_in = self.asset_idx
         obs = torch.FloatTensor(self.observations[idx].astype(float))
@@ -62,4 +70,7 @@ class TradingBCTransformer2Dataset(Dataset):
         actions = torch.LongTensor(
             self.action_series[idx, s_idx].astype(int))
 
-        return assets_in, obs, actions
+        updowns = torch.LongTensor(
+            self.updown_series[idx].astype(int))
+
+        return assets_in, obs, actions, updowns

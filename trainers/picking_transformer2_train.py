@@ -1,10 +1,9 @@
 """
-    Training procedure for Trading BC Transformer 2
+    Training procedure for Picking Transformer with Cash
 
     @author: Younghyun Kim
-    Created: 2022.12.18
+    Created: 2023.01.29
 """
-import pickle
 import argparse
 import os
 import numpy as np
@@ -20,24 +19,24 @@ from ray.air import session
 from ray.air.checkpoint import Checkpoint
 from ray.tune.schedulers import ASHAScheduler
 
-from models.cfg.trading_bc_transformer2_config import (
-    TRADING_BC_TRANSFORMER2_TRAIN_CONFIG,
-    TRADING_BC_TRANSFORMER2_TRAIN_K200_CONFIG)
-from datasets.trading_bc_transformer2_dataset import TradingBCTransformer2Dataset
-from models.trading_bc_transformer2 import TradingBCTransformer2
+from models.cfg.picking_transformer2_config import PICKING_TRANSFORMER2_TRAIN_CONFIG
+from datasets.picking_transformer2_dataset import PickingTransformer2Dataset
+from models.picking_transformer2 import PickingTransformer2
 
 def train_trader(config):
     use_cuda = torch.cuda.is_available()
     device = torch.device('cuda' if use_cuda else 'cpu')
 
     train_loader, valid_loader = get_data_loaders(
-        config['datasets_path'], config['asset_idx'],
+        config['close_data_path'], config['value_data_path'],
+        config['returns_path'], config['seq_len'],
         config['valid_prob'],
         int(config['batch_size'] / config['num_workers']),
         int(config['valid_batch_size'] / config['num_workers']),
-        config['num_workers'])
+        config['asset_num_indices'],
+        config['data_num_workers'])
 
-    model = TradingBCTransformer2(config).to(device)
+    model = PickingTransformer2(config).to(device)
     model.eval()
 
     optimizer = optim.Adam(model.parameters(),
@@ -63,19 +62,10 @@ def train_trader(config):
         model.load_state_dict(model_state)
         optimizer.load_state_dict(optimizer_state)
 
-    pretrain_epoch = int(
-        config['pretrain_epoch_prob'] * config['epoch_size'])
-
     for epoch in range(config['epoch_size']):
-        if epoch < (pretrain_epoch - 1):
-            pretrain = True
-        else:
-            pretrain = False
-
-        train(model, optimizer, train_loader, device,
-            pretrain, config['updown_coeff'])
-        loss, loss_ud, loss_act = validation(
-            model, valid_loader, device, config['updown_coeff'])
+        train(model, optimizer, train_loader, device)
+        loss, loss_max, loss_prets = validation(
+            model, valid_loader, device)
 
         if lr_scheduling:
             scheduler.step()
@@ -86,36 +76,42 @@ def train_trader(config):
         checkpoint = Checkpoint.from_directory("model_trained")
 
         session.report({"loss": loss,
-                        "loss_ud": loss_ud,
-                        "loss_act": loss_act},
+                        "loss_max": loss_max,
+                        "loss_prets": loss_prets},
                         checkpoint=checkpoint)
 
-def get_data_loaders(datasets_path, asset_idx=0,
+def get_data_loaders(close_data_path, value_data_path,
+                    returns_path, window=30,
                     valid_prob=0.3, batch_size=64,
-                    valid_batch_size=64, num_workers=4):
+                    valid_batch_size=64,
+                    asset_num_indices=[5, 20, 40, 50],
+                    num_workers=4):
     """
         Get DataLoaders
     """
-    with open(datasets_path, 'rb') as f:
-        datasets = pickle.load(f)
+    close_data = np.load(close_data_path, allow_pickle=True)
+    value_data = np.load(value_data_path, allow_pickle=True)
+    returns = np.load(returns_path, allow_pickle=True)
 
-    observations = datasets['observations']
-    action_series = datasets['action_series']
-    updown_series = datasets['updown_series']
+    indices = np.arange(close_data.shape[0])
+    indices = indices[window-1:-1]
 
-    indices = np.arange(observations.shape[0])
+    index_indices = np.arange(len(indices))
+
     valid_size = int(valid_prob * len(indices))
     valid_indices = np.random.choice(
-        indices, valid_size, replace=False)
+        index_indices, valid_size, replace=False)
 
-    train_indices = np.setdiff1d(indices, valid_indices)
+    train_indices = np.setdiff1d(index_indices, valid_indices)
 
-    train_dataset = TradingBCTransformer2Dataset(
-        observations[train_indices], action_series[train_indices],
-        updown_series[train_indices], asset_idx)
-    valid_dataset = TradingBCTransformer2Dataset(
-        observations[valid_indices], action_series[valid_indices],
-        updown_series[valid_indices], asset_idx)
+    train_dataset = PickingTransformer2Dataset(
+        close_data, value_data, returns, indices[train_indices],
+        asset_num_indices=asset_num_indices,
+        window=window)
+    valid_dataset = PickingTransformer2Dataset(
+        close_data, value_data, returns, indices[valid_indices],
+        asset_num_indices=asset_num_indices,
+        window=window)
 
     train_dataloader = DataLoader(
         train_dataset, batch_size=batch_size,
@@ -126,87 +122,80 @@ def get_data_loaders(datasets_path, asset_idx=0,
 
     return train_dataloader, valid_dataloader
 
-def train(model, optimizer, train_loader, device=None, pretrain=False,
-        updown_coeff=0.2):
+def train(model, optimizer, train_loader, device=None):
     """
         train method
     """
     device = device or torch.device('cpu')
     model.train()
 
-    loss_ca = nn.CrossEntropyLoss()
+    loss_kld = nn.KLDivLoss(reduction='batchmean')
 
     for batch, (
-        assets_in, obs, actions, updowns) in enumerate(train_loader):
-        assets_in = assets_in.to(device)
-        obs = obs.to(device)
-        actions = actions.to(device)
-        updowns = updowns.to(device)
+        obs_dict, max_weights_dict, rets_dict
+        ) in enumerate(train_loader):
 
-        if pretrain:
-            a_preds, _ = model(assets_in, obs, updowns)
+        for num in obs_dict.keys():
+            obs = obs_dict[num].to(device)
+            max_weights = max_weights_dict[num].to(device)
+            rets = rets_dict[num].to(device)
 
-            loss = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
-                            updowns.view(-1))
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-        else:
-            a_preds, _ = model(assets_in, obs, actions)
-
-            loss = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
-                            actions.view(-1))
+            # Max Return Weights
+            preds, _ = model(obs, softmax=True)
+            loss = loss_kld(preds.log(), max_weights)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            a_preds, _ = model(assets_in, obs, updowns)
-
-            loss = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
-                            updowns.view(-1)) * updown_coeff
+            # port rets
+            preds, _ = model(obs, softmax=True)
+            loss = -(preds * rets).sum(dim=-1).mean()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
 @torch.no_grad()
-def validation(model, valid_loader, device=None,
-            pretrain=False, updown_coeff=0.2):
+def validation(model, valid_loader, device=None):
     """
         validation method
     """
     device = device or torch.device('cpu')
     model.eval()
 
-    loss_ca = nn.CrossEntropyLoss()
+    loss_kld = nn.KLDivLoss(reduction='batchmean')
 
-    losses, losses_ud, losses_act = 0., 0., 0.
+    losses = 0.
+    losses_max, losses_prets = 0., 0.
 
     for batch, (
-        assets_in, obs, actions, updowns) in enumerate(valid_loader):
-        assets_in = assets_in.to(device)
-        obs = obs.to(device)
-        actions = actions.to(device)
-        updowns = updowns.to(device)
+        obs_dict, max_weights_dict, rets_dict
+        ) in enumerate(valid_loader):
 
-        a_preds, _ = model(assets_in, obs, updowns)
-        loss_ud = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
-                        updowns.view(-1))
+        num_len = len(obs_dict)
 
-        a_preds, _ = model(assets_in, obs, actions)
-        loss_act = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
-                        actions.view(-1))
+        for num in obs_dict.keys():
+            obs = obs_dict[num].to(device)
+            max_weights = max_weights_dict[num].to(device)
+            rets = rets_dict[num].to(device)
 
-        losses_ud += loss_ud.item() / (batch + 1)
-        losses_act += loss_act.item() / (batch + 1)
+            # Max Return Weights
+            preds, _ = model(obs, softmax=True)
+            loss_max = loss_kld(preds.log(), max_weights)
 
-        if pretrain:
-            losses = losses_ud
-        else:
+            # Return Upgrade
+            preds, _ = model(obs, softmax=True)
+            loss_prets = (preds * rets).sum(dim=-1).mean()
+
             losses += (
-                (loss_ud.item() * updown_coeff)
-                + loss_act.item()) / (2 * (batch + 1))
+                loss_max.item() - loss_prets.item())/ 2. / num_len
+            losses_max += loss_max.item() / num_len
+            losses_prets += loss_prets.item() / num_len
 
-    return losses, losses_ud, losses_act
+    losses /= (batch + 1)
+    losses_max /= (batch + 1)
+    losses_prets /= (batch + 1)
+
+    return losses, losses_max, losses_prets
 
 def _parser():
     """
@@ -223,6 +212,9 @@ def _parser():
         "--num_workers", type=int, default=8,
         help="Set number of workers for training")
     parser.add_argument(
+        "--data_num_workers", type=int, default=2,
+        help="Set number of workers for dataloader")
+    parser.add_argument(
         "--epoch_size", type=int, default=1000,
         help="epoch size")
     parser.add_argument(
@@ -238,7 +230,7 @@ def _parser():
         "--num_samples", type=int, default=5,
         help="num samples from ray tune")
     parser.add_argument(
-        "--model_name", type=str, default="trading_bc_transformer2",
+        "--model_name", type=str, default="picking_transformer",
         help="model name")
     parser.add_argument(
         "--device", type=str, default='cpu',
@@ -252,14 +244,6 @@ def _parser():
         "--sched_term", type=int, default=5)
     parser.add_argument(
         "--lr_decay", type=float, default=0.99)
-    parser.add_argument(
-        "--k200", action="store_true", default=False)
-    parser.add_argument(
-        "--pretrain_epoch_prob", type=float, default=0.5,
-        help="pretrain epoch prob")
-    parser.add_argument(
-        "--updown_coeff", type=float, default=0.5,
-        help="updown coeff")
 
     args = parser.parse_args()
 
@@ -271,10 +255,7 @@ def main():
     """
     args = _parser()
 
-    if args.k200:
-        config = TRADING_BC_TRANSFORMER2_TRAIN_K200_CONFIG
-    else:
-        config = TRADING_BC_TRANSFORMER2_TRAIN_CONFIG
+    config = PICKING_TRANSFORMER2_TRAIN_CONFIG
 
     config['epoch_size'] = args.epoch_size
     config['batch_size'] = args.batch_size
@@ -289,8 +270,7 @@ def main():
     config['sched_term'] = args.sched_term
     config['lr_decay'] = args.lr_decay
     config['num_workers'] = args.num_workers
-    config['pretrain_epoch_prob'] = args.pretrain_epoch_prob
-    config['updown_coeff'] = args.updown_coeff
+    config['data_num_workers'] = args.data_num_workers
 
     ray.init(num_cpus=config['num_workers'])
 

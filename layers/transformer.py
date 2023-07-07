@@ -48,10 +48,7 @@ class TransformerEnc(nn.Module):
             generate Square Subsequent Mask
         """
         mask = (torch.triu(torch.ones((seq_len, seq_len),
-        device=self.device)) == 1).transpose(0, 1)
-
-        mask = mask.float().masked_fill(mask == 0,
-            float('-inf')).masked_fill(mask == 1, float(0.0))
+        device=self.device)) == 0).transpose(0, 1).type(torch.bool)
 
         return mask
 
@@ -111,10 +108,7 @@ class TransformerDec(nn.Module):
             generate Square Subsequent Mask
         """
         mask = (torch.triu(torch.ones((seq_len, seq_len),
-        device=self.device)) == 1).transpose(0, 1)
-
-        mask = mask.float().masked_fill(mask == 0,
-            float('-inf')).masked_fill(mask == 1, float(0.0))
+        device=self.device)) == 0).transpose(0, 1).type(torch.bool)
 
         return mask
 

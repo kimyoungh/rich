@@ -172,14 +172,17 @@ class TradingBCTransformer2(nn.Module):
                     * shape: (batch_size, seq_len, factor_num)
                 actions_in: action index series
                     * dtype: torch.LongTensor
-                    * shape: (batch_size, seq_len)
+                    * shape: (batch_size, seq_len-1)
             Returns:
                 action_preds
                     * dtype: torch.FloatTensor
-                    * shape: (batch_size, seq_len, action_num)
+                    * shape: (batch_size, seq_len)
                 outputs
                     * dtype: torch.FloatTensor
                     * shape: (batch_size, action_num+3, seq_len, d_model)
+                action_pr
+                    * dtype: torch.FloatTensor
+                    * shape: (batch_size, action_num)
         """
         batch_size, seq_len, _ = obs_in.shape
 
@@ -216,12 +219,13 @@ class TradingBCTransformer2(nn.Module):
             outs = self.dt(inputs, seq_mask=seq_mask,
                         src_key_padding_mask=src_key_padding_mask)
 
-            action_p = self.action_preds(outs[:, -1]).argmax(-1)
+            action_pr = self.action_preds(outs[:, -1])
+            action_p = action_pr.argmax(-1)
 
             action_preds = torch.cat(
                 (actions_in, action_p.unsqueeze(1)), dim=1)
 
-            return action_preds, outs
+            return action_preds, outs, action_pr.softmax(dim=-1)
         else:
             assert seq_len == 1
 
@@ -235,6 +239,7 @@ class TradingBCTransformer2(nn.Module):
 
             outputs = outs[:, 1:].view(batch_size, 1, seq_len, -1)
 
-            action_preds = self.action_preds(outputs[:, 0]).argmax(-1)
+            action_pr = self.action_preds(outputs[:, 0])
+            action_preds = action_pr.argmax(-1)
 
-            return action_preds, outs
+            return action_preds, outs, action_pr.softmax(dim=-1)

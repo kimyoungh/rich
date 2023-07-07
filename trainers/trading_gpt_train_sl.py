@@ -1,8 +1,8 @@
 """
-    Training procedure for Trading BC Transformer 2
+    Training procedure for TradingGPT(Supervised-Learning)
 
     @author: Younghyun Kim
-    Created: 2022.12.18
+    Created: 2023.04.02
 """
 import pickle
 import argparse
@@ -20,24 +20,23 @@ from ray.air import session
 from ray.air.checkpoint import Checkpoint
 from ray.tune.schedulers import ASHAScheduler
 
-from models.cfg.trading_bc_transformer2_config import (
-    TRADING_BC_TRANSFORMER2_TRAIN_CONFIG,
-    TRADING_BC_TRANSFORMER2_TRAIN_K200_CONFIG)
-from datasets.trading_bc_transformer2_dataset import TradingBCTransformer2Dataset
-from models.trading_bc_transformer2 import TradingBCTransformer2
+from models.cfg.trading_gpt_config import TRADING_GPT_TRAIN_CONFIG
+from datasets.trading_gpt_dataset import TradingGPTDataset
+from models.trading_gpt import TradingGPT
 
 def train_trader(config):
     use_cuda = torch.cuda.is_available()
     device = torch.device('cuda' if use_cuda else 'cpu')
 
     train_loader, valid_loader = get_data_loaders(
-        config['datasets_path'], config['asset_idx'],
-        config['valid_prob'],
+        config['datasets_path'],
+        config['trading_period'], config['valid_prob'],
         int(config['batch_size'] / config['num_workers']),
         int(config['valid_batch_size'] / config['num_workers']),
         config['num_workers'])
 
-    model = TradingBCTransformer2(config).to(device)
+    model = TradingGPT(config).to(device)
+    #model = torch.compile(model, backend='inductor')
     model.eval()
 
     optimizer = optim.Adam(model.parameters(),
@@ -48,9 +47,8 @@ def train_trader(config):
     lr_scheduling = config['lr_scheduling']
 
     if lr_scheduling:
-        scheduler = optim.lr_scheduler.StepLR(
-            optimizer, config['sched_term'],
-            gamma=config['lr_decay'])
+        scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, config['T_0'], config['T_mult'])
     else:
         scheduler = None
 
@@ -63,19 +61,11 @@ def train_trader(config):
         model.load_state_dict(model_state)
         optimizer.load_state_dict(optimizer_state)
 
-    pretrain_epoch = int(
-        config['pretrain_epoch_prob'] * config['epoch_size'])
+    assets = torch.tensor([config['asset_idx']])
 
     for epoch in range(config['epoch_size']):
-        if epoch < (pretrain_epoch - 1):
-            pretrain = True
-        else:
-            pretrain = False
-
-        train(model, optimizer, train_loader, device,
-            pretrain, config['updown_coeff'])
-        loss, loss_ud, loss_act = validation(
-            model, valid_loader, device, config['updown_coeff'])
+        train(model, optimizer, train_loader, assets, device)
+        loss = validation(model, valid_loader, assets, device)
 
         if lr_scheduling:
             scheduler.step()
@@ -85,12 +75,10 @@ def train_trader(config):
                 "model_trained/checkpoint_model.pt")
         checkpoint = Checkpoint.from_directory("model_trained")
 
-        session.report({"loss": loss,
-                        "loss_ud": loss_ud,
-                        "loss_act": loss_act},
+        session.report({"loss": loss},
                         checkpoint=checkpoint)
 
-def get_data_loaders(datasets_path, asset_idx=0,
+def get_data_loaders(datasets_path, trading_period=60,
                     valid_prob=0.3, batch_size=64,
                     valid_batch_size=64, num_workers=4):
     """
@@ -99,23 +87,18 @@ def get_data_loaders(datasets_path, asset_idx=0,
     with open(datasets_path, 'rb') as f:
         datasets = pickle.load(f)
 
-    observations = datasets['observations']
-    action_series = datasets['action_series']
-    updown_series = datasets['updown_series']
-
-    indices = np.arange(observations.shape[0])
+    indices = np.arange(
+        len(datasets['observations']) - trading_period + 1)
     valid_size = int(valid_prob * len(indices))
     valid_indices = np.random.choice(
         indices, valid_size, replace=False)
 
     train_indices = np.setdiff1d(indices, valid_indices)
 
-    train_dataset = TradingBCTransformer2Dataset(
-        observations[train_indices], action_series[train_indices],
-        updown_series[train_indices], asset_idx)
-    valid_dataset = TradingBCTransformer2Dataset(
-        observations[valid_indices], action_series[valid_indices],
-        updown_series[valid_indices], asset_idx)
+    train_dataset = TradingGPTDataset(datasets, train_indices,
+                                    trading_period)
+    valid_dataset = TradingGPTDataset(datasets, valid_indices,
+                                    trading_period)
 
     train_dataloader = DataLoader(
         train_dataset, batch_size=batch_size,
@@ -126,8 +109,7 @@ def get_data_loaders(datasets_path, asset_idx=0,
 
     return train_dataloader, valid_dataloader
 
-def train(model, optimizer, train_loader, device=None, pretrain=False,
-        updown_coeff=0.2):
+def train(model, optimizer, train_loader, assets, device=None):
     """
         train method
     """
@@ -136,41 +118,23 @@ def train(model, optimizer, train_loader, device=None, pretrain=False,
 
     loss_ca = nn.CrossEntropyLoss()
 
-    for batch, (
-        assets_in, obs, actions, updowns) in enumerate(train_loader):
-        assets_in = assets_in.to(device)
+    for batch, (obs, actions, returns) in enumerate(train_loader):
         obs = obs.to(device)
         actions = actions.to(device)
-        updowns = updowns.to(device)
+        returns = returns.to(device)
 
-        if pretrain:
-            a_preds, _ = model(assets_in, obs, updowns)
+        assets_in = assets.repeat(obs.shape[0]).to(device)
 
-            loss = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
-                            updowns.view(-1))
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-        else:
-            a_preds, _ = model(assets_in, obs, actions)
+        a_preds, _ = model(assets_in, obs, actions, torch.abs(returns))
 
-            loss = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
-                            actions.view(-1))
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            a_preds, _ = model(assets_in, obs, updowns)
-
-            loss = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
-                            updowns.view(-1)) * updown_coeff
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        loss = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
+                        actions.view(-1))
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
 
 @torch.no_grad()
-def validation(model, valid_loader, device=None,
-            pretrain=False, updown_coeff=0.2):
+def validation(model, valid_loader, assets, device=None):
     """
         validation method
     """
@@ -179,34 +143,24 @@ def validation(model, valid_loader, device=None,
 
     loss_ca = nn.CrossEntropyLoss()
 
-    losses, losses_ud, losses_act = 0., 0., 0.
+    losses = 0.
 
-    for batch, (
-        assets_in, obs, actions, updowns) in enumerate(valid_loader):
-        assets_in = assets_in.to(device)
+    length = len(valid_loader)
+
+    for batch, (obs, actions, returns) in enumerate(valid_loader):
         obs = obs.to(device)
         actions = actions.to(device)
-        updowns = updowns.to(device)
+        returns = returns.to(device)
 
-        a_preds, _ = model(assets_in, obs, updowns)
-        loss_ud = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
-                        updowns.view(-1))
+        assets_in = assets.repeat(obs.shape[0]).to(device)
 
-        a_preds, _ = model(assets_in, obs, actions)
-        loss_act = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
+        a_preds, _ = model(assets_in, obs, actions, torch.abs(returns))
+        loss = loss_ca(a_preds.view(-1, a_preds.shape[-1]),
                         actions.view(-1))
 
-        losses_ud += loss_ud.item() / (batch + 1)
-        losses_act += loss_act.item() / (batch + 1)
+        losses += loss.item() / length
 
-        if pretrain:
-            losses = losses_ud
-        else:
-            losses += (
-                (loss_ud.item() * updown_coeff)
-                + loss_act.item()) / (2 * (batch + 1))
-
-    return losses, losses_ud, losses_act
+    return losses
 
 def _parser():
     """
@@ -220,7 +174,7 @@ def _parser():
     )
 
     parser.add_argument(
-        "--num_workers", type=int, default=8,
+        "--train_num_workers", type=int, default=8,
         help="Set number of workers for training")
     parser.add_argument(
         "--epoch_size", type=int, default=1000,
@@ -238,8 +192,8 @@ def _parser():
         "--num_samples", type=int, default=5,
         help="num samples from ray tune")
     parser.add_argument(
-        "--model_name", type=str, default="trading_bc_transformer2",
-        help="model name")
+        "--model_sl_name", type=str, default="trading_gpt_sl",
+        help="model sl name")
     parser.add_argument(
         "--device", type=str, default='cpu',
         help="device")
@@ -248,18 +202,8 @@ def _parser():
         help="lr")
     parser.add_argument(
         "--lr_scheduling", action="store_true", default=False)
-    parser.add_argument(
-        "--sched_term", type=int, default=5)
-    parser.add_argument(
-        "--lr_decay", type=float, default=0.99)
-    parser.add_argument(
-        "--k200", action="store_true", default=False)
-    parser.add_argument(
-        "--pretrain_epoch_prob", type=float, default=0.5,
-        help="pretrain epoch prob")
-    parser.add_argument(
-        "--updown_coeff", type=float, default=0.5,
-        help="updown coeff")
+    parser.add_argument("--T_0", type=int, default=10)
+    parser.add_argument("--T_mult", type=int, default=1)
 
     args = parser.parse_args()
 
@@ -271,33 +215,28 @@ def main():
     """
     args = _parser()
 
-    if args.k200:
-        config = TRADING_BC_TRANSFORMER2_TRAIN_K200_CONFIG
-    else:
-        config = TRADING_BC_TRANSFORMER2_TRAIN_CONFIG
+    config = TRADING_GPT_TRAIN_CONFIG
 
     config['epoch_size'] = args.epoch_size
     config['batch_size'] = args.batch_size
     config['valid_batch_size'] = args.valid_batch_size
-    config['model_name'] = args.model_name
+    config['model_sl_name'] = args.model_sl_name
     config['device'] = args.device
     config['num_samples'] = args.num_samples
 
     if args.lr is not None:
         config['lr'] = args.lr
     config['lr_scheduling'] = args.lr_scheduling
-    config['sched_term'] = args.sched_term
-    config['lr_decay'] = args.lr_decay
-    config['num_workers'] = args.num_workers
-    config['pretrain_epoch_prob'] = args.pretrain_epoch_prob
-    config['updown_coeff'] = args.updown_coeff
+    config['train_num_workers'] = args.train_num_workers
+    config['T_0'] = args.T_0
+    config['T_mult'] = args.T_mult
 
-    ray.init(num_cpus=config['num_workers'])
+    ray.init(num_cpus=config['train_num_workers'])
 
     sched = ASHAScheduler(max_t=config['epoch_size'])
 
     resources_per_trial = {
-        "cpu": args.num_workers,
+        "cpu": args.train_num_workers,
         "gpu": 1 if config['device'] == 'cuda'
                 and torch.cuda.is_available() else 0}
     tuner = tune.Tuner(
@@ -310,9 +249,9 @@ def main():
             num_samples=args.num_samples
         ),
         run_config=air.RunConfig(
-            name=config['model_name'],
+            name=config['model_sl_name'],
             local_dir=os.path.join(config['checkpoint_dir'],
-                                config['model_name']),
+                                config['model_sl_name']),
         ),
         param_space=config
     )
@@ -325,7 +264,7 @@ def main():
                             map_location=torch.device(config['device']))
 
     best_model_save_path = os.path.join(
-        config['model_path'], config['model_name'],
+        config['model_path'], config['model_sl_name'],
     )
     if not os.path.exists(best_model_save_path):
         os.mkdir(best_model_save_path)
@@ -333,7 +272,7 @@ def main():
     # Save Best Model
     torch.save(best_model, os.path.join(
         best_model_save_path,
-        config['model_name']+"_best.pt"))
+        config['model_sl_name']+"_best.pt"))
 
     print("Best config is: ", best_results.config)
     print(best_results.log_dir)

@@ -129,7 +129,7 @@ class TradingBCTransformer(nn.Module):
                     * dtype: torch.LongTensor
                     * shape: (batch_size, seq_len)
                 rewards_in: reward index series
-                    * dtype: torch.LongTensor
+                    * dtype: torch.FloatTensor
                     * shape: (batch_size, seq_len)
             Returns:
                 action_preds
@@ -203,7 +203,7 @@ class TradingBCTransformer(nn.Module):
                     * dtype: torch.LongTensor
                     * shape: (batch_size, seq_len)
                 rewards_in: reward index series
-                    * dtype: torch.LongTensor
+                    * dtype: torch.FloatTensor
                     * shape: (batch_size, seq_len)
             Returns:
                 action_preds
